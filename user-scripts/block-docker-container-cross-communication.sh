@@ -86,9 +86,9 @@ apply_iptables_rule() {
 
     BLOCKED_SUBNET=$(get_blocked_subnet)
 
-    acquire_iptables_lock
     remove_duplicate_rules
 
+    acquire_iptables_lock
     # Apply new rule with comment
     logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
     iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
