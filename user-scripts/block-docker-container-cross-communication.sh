@@ -1,8 +1,9 @@
 #!/bin/bash
 
 LOCK_FILE="/var/run/docker-watch-cross-com.lock"
+IPTABLES_LOCK="/var/lock/iptables.lock"
 
-# Function to check and remove stale lock files (older than 8 seconds)
+# Function to check and remove stale lock files (older than 5 seconds)
 cleanup_stale_lock() {
     if [[ -f "$LOCK_FILE" ]]; then
         LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE") ))
@@ -23,7 +24,7 @@ fi
 # Trap to remove lock file on exit
 trap 'rm -f "$LOCK_FILE"; exit' INT TERM EXIT
 
-# Start a background subprocess to touch the lock file every 5 seconds
+# Start a background subprocess to touch the lock file every 3 seconds
 ( while true; do
     sleep 3
     touch "$LOCK_FILE"
@@ -41,7 +42,33 @@ get_blocked_subnet() {
         BLOCKED_SUBNET="$DEFAULT_SUBNET"
     fi
 
-    logger -t userscript1[$$] "$BLOCKED_SUBNET"
+    echo "$BLOCKED_SUBNET"
+}
+
+# Function to safely modify iptables with lock
+apply_iptables_rule() {
+    # Ensure Docker is running before updating iptables
+    if [ ! -S /var/run/docker.sock ]; then
+        logger -t userscript1[$$] "$(date): Docker is not running. Skipping iptables update."
+        return
+    fi
+
+    BLOCKED_SUBNET=$(get_blocked_subnet)
+
+    # Wait for iptables lock (blocks until released)
+    exec 200>"$IPTABLES_LOCK"
+    logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
+    flock -x 200  # Blocking lock, waits until available
+
+    # Remove duplicate and outdated rules by line number
+    remove_duplicate_rules
+
+    # Apply new rule with comment
+    logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
+    iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
+    logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
+
+    # Release lock (automatically released on exit)
 }
 
 # Function to remove duplicate iptables rules **by line number**
@@ -53,25 +80,6 @@ remove_duplicate_rules() {
         logger -t userscript1[$$] "Removing duplicate rule at line $line_num"
         iptables -D FORWARD "$line_num"
     done
-}
-
-# Function to apply the iptables rule **only if Docker is running**
-apply_iptables_rule() {
-    # Ensure Docker is running before updating iptables
-    if [ ! -S /var/run/docker.sock ]; then
-        logger -t userscript1[$$] "$(date): Docker is not running. Skipping iptables update."
-        return
-    fi
-
-    BLOCKED_SUBNET=$(get_blocked_subnet)
-
-    # Remove duplicate and outdated rules by line number
-    remove_duplicate_rules
-
-    # Apply new rule with comment
-    logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
-    iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
-    logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET (block docker container cross communication)."
 }
 
 # Run the rule immediately **only if Docker is running**
