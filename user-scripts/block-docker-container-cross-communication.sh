@@ -3,6 +3,7 @@
 LOCK_FILE="/var/run/docker-watch-cross-com.lock"
 IPTABLES_LOCK="/var/lock/iptables.lock"
 IPTABLES_COMMENT="block docker container cross communication"  # Easily change this comment
+SCRIPT_ID=userscript1
 
 # Function to check and remove stale lock files (older than 5 seconds)
 cleanup_stale_locks() {
@@ -10,7 +11,7 @@ cleanup_stale_locks() {
     if [[ -f "$LOCK_FILE" ]]; then
         LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE") ))
         if [[ $LOCK_AGE -gt 5 ]]; then
-            logger -t userscript1[$$] "$(date): Stale script lock detected (age: $LOCK_AGE seconds). Removing..."
+            logger -t $SCRIPT_ID[$$] "$(date): Stale script lock detected (age: $LOCK_AGE seconds). Removing..."
             rm -f "$LOCK_FILE"
         fi
     fi
@@ -19,7 +20,7 @@ cleanup_stale_locks() {
     if [[ -f "$IPTABLES_LOCK" ]]; then
         IPTABLES_LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$IPTABLES_LOCK") ))
         if [[ $IPTABLES_LOCK_AGE -gt 5 ]]; then
-            logger -t userscript1[$$] "$(date): Stale iptables lock detected (age: $IPTABLES_LOCK_AGE seconds). Removing..."
+            logger -t $SCRIPT_ID[$$] "$(date): Stale iptables lock detected (age: $IPTABLES_LOCK_AGE seconds). Removing..."
             rm -f "$IPTABLES_LOCK"
         fi
     fi
@@ -28,7 +29,7 @@ cleanup_stale_locks() {
 # Ensure only one instance runs at a time
 cleanup_stale_locks
 if [[ -f "$LOCK_FILE" ]]; then
-    logger -t userscript1[$$] "$(date): Another instance is already running. Exiting."
+    logger -t $SCRIPT_ID[$$] "$(date): Another instance is already running. Exiting."
     exit 1
 fi
 
@@ -41,30 +42,15 @@ trap 'rm -f "$LOCK_FILE"; exec 200>&-; exit' INT TERM EXIT
     touch "$LOCK_FILE"
 done ) &
 
-# Default subnet in case Docker bridge inspection fails
-DEFAULT_SUBNET="172.17.0.0/16"
-
-# Function to determine the current blocked subnet
-get_blocked_subnet() {
-    BLOCKED_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
-
-    # Set to default subnet if Docker command fails or returns empty
-    if [[ -z "$BLOCKED_SUBNET" ]]; then
-        BLOCKED_SUBNET="$DEFAULT_SUBNET"
-    fi
-
-    echo "$BLOCKED_SUBNET"
-}
-
 # Function to acquire iptables lock safely
 acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
-    logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
+    logger -t $SCRIPT_ID[$$] "$(date): Waiting for iptables lock..."
     flock -x -w 5 200 || {
-        logger -t userscript1[$$] "$(date): Timed out waiting for iptables lock"
+        logger -t $SCRIPT_ID[$$] "$(date): Timed out waiting for iptables lock"
         exit 1
     }
-    logger -t userscript1[$$] "$(date): Acquired iptables lock."
+    logger -t $SCRIPT_ID[$$] "$(date): Acquired iptables lock."
     trap 'release_iptables_lock' EXIT  # Ensures release even on crash
 }
 
@@ -72,21 +58,31 @@ acquire_iptables_lock() {
 release_iptables_lock() {
     exec 200>&-  # Close the lock descriptor
     rm -f "$IPTABLES_LOCK"  # Ensure lock file is removed
-    logger -t userscript1[$$] "$(date): Released iptables lock."
+    logger -t $SCRIPT_ID[$$] "$(date): Released iptables lock."
 }
 
-# Function to remove duplicate iptables rules **by exact match instead of line number**
+# Function to determine the current blocked subnet
+get_blocked_subnet() {
+    BLOCKED_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
+    BLOCKED_SUBNET=${BLOCKED_SUBNET:-"172.17.0.0/16"}
+    echo "$BLOCKED_SUBNET"
+}
+
+# Function to remove duplicate iptables rules **by exact match**
 remove_duplicate_rules() {
     acquire_iptables_lock
-    logger -t userscript1[$$] "Checking for duplicate iptables rules..."
+    logger -t $SCRIPT_ID[$$] "Checking for duplicate iptables rules in FORWARD..."
 
-    # Get the blocked subnet
-    BLOCKED_SUBNET=$(get_blocked_subnet)
+    iptables-save | grep -- "-A FORWARD -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
+        SRC_IP=$(echo "$rule" | grep -oP '(?<=-s )[^ ]+')
+        DST_IP=$(echo "$rule" | grep -oP '(?<=-d )[^ ]+')
 
-    # Find existing rules that match the same source and destination
-    iptables-save | grep -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
-        logger -t userscript1[$$] "Removing duplicate rule: $rule"
-        iptables -D FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -m comment --comment "$IPTABLES_COMMENT" -j DROP
+        if [[ -n "$SRC_IP" && -n "$DST_IP" ]]; then
+            logger -t $SCRIPT_ID[$$] "Removing duplicate rule: $rule"
+            iptables -D FORWARD -s "$SRC_IP" -d "$DST_IP" -m comment --comment "$IPTABLES_COMMENT" -j DROP
+        else
+            logger -t $SCRIPT_ID[$$] "Skipping malformed rule: $rule"
+        fi
     done
 
     release_iptables_lock
@@ -96,7 +92,7 @@ remove_duplicate_rules() {
 apply_iptables_rule() {
     # Ensure Docker is running before updating iptables
     if [ ! -S /var/run/docker.sock ]; then
-        logger -t userscript1[$$] "$(date): Docker is not running. Skipping iptables update."
+        logger -t $SCRIPT_ID[$$] "$(date): Docker is not running. Skipping iptables update."
         return
     fi
 
@@ -109,12 +105,12 @@ apply_iptables_rule() {
 
     # Check if the rule already exists
     if iptables-save | grep -q -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -m comment --comment \"$IPTABLES_COMMENT\""; then
-        logger -t userscript1[$$] "$(date): Rule already exists. Skipping addition."
+        logger -t $SCRIPT_ID[$$] "$(date): Rule already exists. Skipping addition."
     else
         # Apply new rule with comment
-        logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
+        logger -t $SCRIPT_ID[$$] "$(date): Applying iptables rule to block cross-container communication..."
         iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "$IPTABLES_COMMENT"
-        logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
+        logger -t $SCRIPT_ID[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
     fi
 
     release_iptables_lock
@@ -123,14 +119,14 @@ apply_iptables_rule() {
 # Run the rule immediately **only if Docker is running**
 apply_iptables_rule
 
-logger -t userscript1[$$] "Monitoring Docker restarts..."
+logger -t $SCRIPT_ID[$$] "Monitoring Docker restarts..."
 
 # Infinite loop to monitor Docker service
 while true; do
     # Wait for Docker to stop
     inotifywait -e delete_self /var/run/dockerd.pid >/dev/null 2>&1
 
-    logger -t userscript1[$$] "$(date): Docker stopped. Waiting for restart..."
+    logger -t $SCRIPT_ID[$$] "$(date): Docker stopped. Waiting for restart..."
 
     # Wait for Docker to start back up
     while [ ! -S /var/run/docker.sock ]; do
@@ -138,7 +134,7 @@ while true; do
         cleanup_stale_locks  # Check if lock file needs to be removed
     done
 
-    logger -t userscript1[$$] "$(date): Docker restarted. Re-applying iptables rule..."
+    logger -t $SCRIPT_ID[$$] "$(date): Docker restarted. Re-applying iptables rule..."
     sleep 2
     
     apply_iptables_rule
