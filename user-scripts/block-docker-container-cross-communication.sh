@@ -21,10 +21,10 @@ if [[ -f "$LOCK_FILE" ]]; then
     exit 1
 fi
 
-# Trap to remove lock file on exit
-trap 'rm -f "$LOCK_FILE"; exit' INT TERM EXIT
+# Trap to remove lock file and release iptables lock on exit
+trap 'rm -f "$LOCK_FILE"; exec 200>&-; exit' INT TERM EXIT
 
-# Start a background subprocess to touch the lock file every 3 seconds
+# Start a background process to keep the lock file updated every 3 seconds
 ( while true; do
     sleep 3
     touch "$LOCK_FILE"
@@ -45,19 +45,29 @@ get_blocked_subnet() {
     echo "$BLOCKED_SUBNET"
 }
 
-# Function to remove duplicate iptables rules **by line number**
-remove_duplicate_rules() {
+# Function to acquire iptables lock safely
+acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock, waits until available
+    flock -x 200  # Blocking lock
+    logger -t userscript1[$$] "$(date): Acquired iptables lock."
+}
 
+# Function to release iptables lock
+release_iptables_lock() {
+    exec 200>&-  # Close the lock file descriptor
+    logger -t userscript1[$$] "$(date): Released iptables lock."
+}
+
+# Function to remove duplicate iptables rules **by line number**
+remove_duplicate_rules() {
+    acquire_iptables_lock
     logger -t userscript1[$$] "Checking for duplicate iptables rules..."
     iptables -L FORWARD --line-numbers | grep "block docker container cross communication" | awk '{print $1}' | sort -rn | while read -r line_num; do
         logger -t userscript1[$$] "Removing duplicate rule at line $line_num"
         iptables -D FORWARD "$line_num"
     done
-
-    logger -t userscript1[$$] "$(date): Released iptables lock."
+    release_iptables_lock
 }
 
 # Function to safely modify iptables with lock
@@ -70,20 +80,15 @@ apply_iptables_rule() {
 
     BLOCKED_SUBNET=$(get_blocked_subnet)
 
-    # Wait for iptables lock (blocks until released)
-    exec 200>"$IPTABLES_LOCK"
-    logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock, waits until available
-
-    # Remove duplicate and outdated rules by line number
+    acquire_iptables_lock
     remove_duplicate_rules
 
     # Apply new rule with comment
     logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
     iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
+    
+    release_iptables_lock
     logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
-
-    logger -t userscript1[$$] "$(date): Released iptables lock."
 }
 
 # Run the rule immediately **only if Docker is running**
@@ -93,7 +98,7 @@ logger -t userscript1[$$] "Monitoring Docker restarts..."
 
 # Infinite loop to monitor Docker service
 while true; do
-    # Wait for Docker to stop (dockerd.pid file is removed)
+    # Wait for Docker to stop
     inotifywait -e delete_self /var/run/dockerd.pid >/dev/null 2>&1
 
     logger -t userscript1[$$] "$(date): Docker stopped. Waiting for restart..."

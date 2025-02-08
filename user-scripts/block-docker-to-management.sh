@@ -21,143 +21,110 @@ if [[ -f "$LOCK_FILE" ]]; then
     exit 1
 fi
 
-# Trap to remove lock file on exit
-trap 'rm -f "$LOCK_FILE"; exit' INT TERM EXIT
+# Trap to remove lock file and release iptables lock on exit
+trap 'rm -f "$LOCK_FILE"; exec 200>&-; exit' INT TERM EXIT
 
-# Start a background subprocess to touch the lock file every 5 seconds
+# Start a background process to touch the lock file every 5 seconds
 ( while true; do
     sleep 3
     touch "$LOCK_FILE"
 done ) &
 
-# Function to get the eth0 IP from iptables rules
-get_current_eth0_ip() {
+# Function to safely acquire and release iptables lock
+acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock, waits until available
+    flock -x 200  # Blocking lock
+    logger -t userscript2[$$] "$(date): Acquired iptables lock."
+}
 
+release_iptables_lock() {
+    exec 200>&-  # Close the lock file descriptor
+    logger -t userscript2[$$] "$(date): Released iptables lock."
+}
+
+# Function to get the eth0 IP from iptables rules
+get_current_eth0_ip() {
+    acquire_iptables_lock
     local ip
     ip=$(iptables -L INPUT -v -n | grep "block docker subnets to management ip" | awk '{print $(NF)}' | head -n 1)
-
-    logger -t userscript2[$$] "$(date): Released iptables lock."
+    release_iptables_lock
     echo "$ip"
 }
 
-# Function to remove duplicate iptables rules **by line number**
+# Function to remove duplicate iptables rules
 remove_duplicate_rules() {
-    exec 200>"$IPTABLES_LOCK"
-    logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock, waits until available
-
+    acquire_iptables_lock
     logger -t userscript2[$$] "Checking for duplicate iptables rules..."
     iptables -L INPUT --line-numbers | grep "block docker subnets to management ip" | awk '{print $1}' | sort -rn | while read -r line_num; do
         logger -t userscript2[$$] "Removing duplicate rule at line $line_num"
         iptables -D INPUT "$line_num"
     done
-
-    logger -t userscript2[$$] "$(date): Released iptables lock."
+    release_iptables_lock
 }
 
-# Function to remove an existing iptables rule for a specific subnet **by line number**
+# Function to remove an iptables rule for a specific subnet
 remove_iptables_rule() {
     local subnet="$1"
-
-    exec 200>"$IPTABLES_LOCK"
-    logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock, waits until available
-
+    acquire_iptables_lock
     logger -t userscript2[$$] "Checking for existing rules for subnet $subnet..."
     iptables -L INPUT --line-numbers | grep "block docker subnets to management ip" | grep "$subnet" | awk '{print $1}' | sort -rn | while read -r line_num; do
         logger -t userscript2[$$] "$(date): Removing old iptables rule at line $line_num for subnet $subnet."
         iptables -D INPUT "$line_num"
     done
-
-    logger -t userscript2[$$] "$(date): Released iptables lock."
+    release_iptables_lock
 }
 
-# Function to determine and apply the iptables rule **only if Docker is running**
+# Function to apply iptables rule if Docker is running
 apply_iptables_rule() {
-    # Ensure Docker is running before updating iptables
     if [ ! -S /var/run/docker.sock ]; then
         logger -t userscript2[$$] "$(date): Docker is not running. Skipping iptables update."
         return
     fi
 
-    # Define the default blocked subnet
     DEFAULT_SUBNET="172.17.0.0/16"
-
-    # Get the blocked subnet from Docker bridge network or use the default
     BLOCKED_SUBNET=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null)
+    BLOCKED_SUBNET=${BLOCKED_SUBNET:-$DEFAULT_SUBNET}
 
-    # Set to default subnet if Docker command fails or returns an empty value
-    if [[ -z "$BLOCKED_SUBNET" ]]; then
-        BLOCKED_SUBNET="$DEFAULT_SUBNET"
-    fi
+    logger -t userscript2[$$] "Blocked Subnet: $BLOCKED_SUBNET"
 
-    logger -t userscript2[$$] "Blocked Subnet (from Docker or default): $BLOCKED_SUBNET"
-
-    # Extract eth0 IP from existing iptables rule (if available)
     IPTABLES_ETH0_IP=$(get_current_eth0_ip)
-
-    # Keep trying to get eth0 IP until it succeeds
     while true; do
         ETH0_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-        
-        if [[ -n "$ETH0_IP" ]]; then
-            break  # Exit loop once a valid IP is found
-        fi
-
-        logger -t userscript2[$$] "Error: Unable to determine eth0 IP address. Retrying in 2 seconds..."
+        [[ -n "$ETH0_IP" ]] && break
+        logger -t userscript2[$$] "Error: Unable to determine eth0 IP. Retrying..."
         sleep 2
     done
 
     logger -t userscript2[$$] "eth0 IP: $ETH0_IP"
 
-    # If eth0 IP has changed, update rules
     if [[ "$ETH0_IP" != "$IPTABLES_ETH0_IP" ]]; then
-        logger -t userscript2[$$] "eth0 IP has changed! Updating iptables rules..."
-
-        # Remove duplicate rules
+        logger -t userscript2[$$] "eth0 IP changed! Updating iptables rules..."
         remove_duplicate_rules
         remove_iptables_rule "$BLOCKED_SUBNET"
-
-        exec 200>"$IPTABLES_LOCK"
-        logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-        flock -x 200  # Blocking lock, waits until available
-
-        # Apply new rule with comment
-        logger -t userscript2[$$] "$(date): Applying iptables rule to block Docker subnets from management IP..."
+        acquire_iptables_lock
+        logger -t userscript2[$$] "Applying iptables rule..."
         iptables -I INPUT -s "$BLOCKED_SUBNET" -d "$ETH0_IP" -j DROP -m comment --comment "block docker subnets to management ip"
-        logger -t userscript2[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET to management IP ($ETH0_IP)."
-
-        logger -t userscript2[$$] "$(date): Released iptables lock."
+        release_iptables_lock
+        logger -t userscript2[$$] "Applied iptables rule for subnet $BLOCKED_SUBNET."
     else
-        logger -t userscript2[$$] "eth0 IP has not changed, no updates required."
+        logger -t userscript2[$$] "eth0 IP unchanged, no updates required."
     fi
 }
 
-# Run the rule immediately **only if Docker is running**
+# Run once initially
 apply_iptables_rule
 
 logger -t userscript2[$$] "Monitoring Docker restarts and eth0 IP changes..."
 
-# Infinite loop to monitor Docker service and eth0 IP address
+# Infinite loop to monitor Docker and eth0 IP address
 while true; do
-    # Wait for Docker to stop
     if [ ! -S /var/run/docker.sock ]; then
         logger -t userscript2[$$] "$(date): Docker stopped. Waiting for restart..."
-        
-        # Use `inotifywait` to wait for Docker to restart
         inotifywait -e create /var/run 2>/dev/null
-
-        # Ensure Docker is back up before proceeding
-        while [ ! -S /var/run/docker.sock ]; do
-            sleep 1
-        done
-        
+        while [ ! -S /var/run/docker.sock ]; do sleep 1; done
         logger -t userscript2[$$] "$(date): Docker restarted. Re-applying iptables rule..."
         apply_iptables_rule
     fi
-
     sleep 5
 done
