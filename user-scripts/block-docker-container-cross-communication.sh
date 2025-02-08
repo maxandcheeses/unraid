@@ -73,7 +73,7 @@ remove_duplicate_rules() {
     acquire_iptables_lock
     logger -t $SCRIPT_ID[$$] "Checking for duplicate iptables rules in FORWARD..."
 
-    iptables-save | grep -- "-A FORWARD -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
+    iptables-save | grep -- "-A FORWARD .* -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
         SRC_IP=$(echo "$rule" | grep -oP '(?<=-s )[^ ]+')
         DST_IP=$(echo "$rule" | grep -oP '(?<=-d )[^ ]+')
 

@@ -75,9 +75,9 @@ remove_duplicate_rules() {
     acquire_iptables_lock
     logger -t $SCRIPT_ID[$$] "Checking for duplicate iptables rules in INPUT..."
 
-    iptables-save | grep -- "-A INPUT -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
+    while read -r rule; do
         SRC_IP=$(echo "$rule" | grep -oP '(?<=-s )[^ ]+')
-        DST_IP=$(echo "$rule" | grep -oP '(?<=-d )[^ ]+')
+        DST_IP=$(echo "$rule" | grep -oP '(?<=-d )[^ ]+/32')
 
         if [[ -n "$SRC_IP" && -n "$DST_IP" ]]; then
             logger -t $SCRIPT_ID[$$] "Removing duplicate rule: $rule"
@@ -85,7 +85,7 @@ remove_duplicate_rules() {
         else
             logger -t $SCRIPT_ID[$$] "Skipping malformed rule: $rule"
         fi
-    done
+    done < <(iptables-save | grep -E -- '-A INPUT -s [0-9./]+ -d [0-9.]+/32 -m comment --comment "'"$IPTABLES_COMMENT"'"')
 
     release_iptables_lock
 }
