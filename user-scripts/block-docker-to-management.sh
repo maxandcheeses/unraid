@@ -34,8 +34,9 @@ done ) &
 acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock
+    flock -x 200 || { logger -t userscript2[$$] "$(date): Failed to acquire iptables lock"; exit 1; }
     logger -t userscript2[$$] "$(date): Acquired iptables lock."
+    trap 'release_iptables_lock' EXIT  # Ensures lock is always released
 }
 
 release_iptables_lock() {

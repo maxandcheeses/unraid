@@ -49,8 +49,9 @@ get_blocked_subnet() {
 acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200  # Blocking lock
+    flock -x 200 || { logger -t userscript1[$$] "$(date): Failed to acquire iptables lock"; exit 1; }
     logger -t userscript1[$$] "$(date): Acquired iptables lock."
+    trap 'release_iptables_lock' EXIT  # Ensures lock is always released
 }
 
 # Function to release iptables lock
