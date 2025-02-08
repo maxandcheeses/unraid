@@ -2,6 +2,7 @@
 
 LOCK_FILE="/var/run/docker-watch-cross-com.lock"
 IPTABLES_LOCK="/var/lock/iptables.lock"
+IPTABLES_COMMENT="block docker container cross communication"  # Easily change this comment
 
 # Function to check and remove stale lock files (older than 5 seconds)
 cleanup_stale_locks() {
@@ -83,9 +84,9 @@ remove_duplicate_rules() {
     BLOCKED_SUBNET=$(get_blocked_subnet)
 
     # Find existing rules that match the same source and destination
-    iptables-save | grep -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -j DROP" | while read -r rule; do
+    iptables-save | grep -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
         logger -t userscript1[$$] "Removing duplicate rule: $rule"
-        iptables -D FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP
+        iptables -D FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -m comment --comment "$IPTABLES_COMMENT" -j DROP
     done
 
     release_iptables_lock
@@ -107,12 +108,12 @@ apply_iptables_rule() {
     acquire_iptables_lock
 
     # Check if the rule already exists
-    if iptables-save | grep -q -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -j DROP"; then
+    if iptables-save | grep -q -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -m comment --comment \"$IPTABLES_COMMENT\""; then
         logger -t userscript1[$$] "$(date): Rule already exists. Skipping addition."
     else
         # Apply new rule with comment
         logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
-        iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
+        iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "$IPTABLES_COMMENT"
         logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
     fi
 

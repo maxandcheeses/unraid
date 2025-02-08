@@ -2,6 +2,7 @@
 
 LOCK_FILE="/var/run/docker-watch-eth0.lock"
 IPTABLES_LOCK="/var/lock/iptables.lock"
+IPTABLES_COMMENT="block docker subnets to management ip"  # Easily change this comment
 
 # Function to check and remove stale lock files (older than 8 seconds)
 cleanup_stale_locks() {
@@ -63,7 +64,7 @@ release_iptables_lock() {
 get_current_eth0_ip() {
     acquire_iptables_lock
     local ip
-    ip=$(iptables-save | grep -- "-A INPUT -m comment --comment \"block docker subnets to management ip\"" | awk '{print $(NF)}' | head -n 1)
+    ip=$(iptables-save | grep -- "-A INPUT -m comment --comment \"$IPTABLES_COMMENT\"" | awk '{print $(NF)}' | head -n 1)
     release_iptables_lock
     echo "$ip"
 }
@@ -73,9 +74,9 @@ remove_duplicate_rules() {
     acquire_iptables_lock
     logger -t userscript2[$$] "Checking for duplicate iptables rules..."
 
-    iptables-save | grep -- "-A INPUT -m comment --comment \"block docker subnets to management ip\"" | while read -r rule; do
+    iptables-save | grep -- "-A INPUT -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
         logger -t userscript2[$$] "Removing duplicate rule: $rule"
-        iptables -D INPUT -m comment --comment "block docker subnets to management ip" -j DROP
+        iptables -D INPUT -m comment --comment "$IPTABLES_COMMENT" -j DROP
     done
 
     release_iptables_lock
@@ -87,9 +88,9 @@ remove_iptables_rule() {
     acquire_iptables_lock
     logger -t userscript2[$$] "Checking for existing rules for subnet $subnet..."
 
-    iptables-save | grep -- "-A INPUT -s $subnet -m comment --comment \"block docker subnets to management ip\"" | while read -r rule; do
+    iptables-save | grep -- "-A INPUT -s $subnet -m comment --comment \"$IPTABLES_COMMENT\"" | while read -r rule; do
         logger -t userscript2[$$] "Removing rule for subnet $subnet: $rule"
-        iptables -D INPUT -s "$subnet" -m comment --comment "block docker subnets to management ip" -j DROP
+        iptables -D INPUT -s "$subnet" -m comment --comment "$IPTABLES_COMMENT" -j DROP
     done
 
     release_iptables_lock
@@ -125,11 +126,11 @@ apply_iptables_rule() {
         acquire_iptables_lock
 
         # Check if rule already exists
-        if iptables-save | grep -q -- "-A INPUT -s $BLOCKED_SUBNET -d $ETH0_IP -m comment --comment \"block docker subnets to management ip\""; then
+        if iptables-save | grep -q -- "-A INPUT -s $BLOCKED_SUBNET -d $ETH0_IP -m comment --comment \"$IPTABLES_COMMENT\""; then
             logger -t userscript2[$$] "$(date): Rule already exists. Skipping addition."
         else
             logger -t userscript2[$$] "$(date): Applying iptables rule..."
-            iptables -I INPUT -s "$BLOCKED_SUBNET" -d "$ETH0_IP" -j DROP -m comment --comment "block docker subnets to management ip"
+            iptables -I INPUT -s "$BLOCKED_SUBNET" -d "$ETH0_IP" -j DROP -m comment --comment "$IPTABLES_COMMENT"
             logger -t userscript2[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
         fi
 
