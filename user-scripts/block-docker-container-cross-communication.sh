@@ -55,19 +55,6 @@ remove_duplicate_rules() {
     done
 }
 
-# Function to remove an existing iptables rule for a specific subnet **by line number**
-remove_iptables_rule() {
-    local subnet="$1"
-
-    logger -t userscript1[$$] "Checking for existing rules for subnet $subnet..."
-
-    # Get line numbers of rules for the specified subnet
-    iptables -L FORWARD --line-numbers | grep "block docker container cross communication" | grep "$subnet" | awk '{print $1}' | sort -rn | while read -r line_num; do
-        logger -t userscript1[$$] "$(date): Removing old iptables rule at line $line_num for subnet $subnet."
-        iptables -D FORWARD "$line_num"
-    done
-}
-
 # Function to apply the iptables rule **only if Docker is running**
 apply_iptables_rule() {
     # Ensure Docker is running before updating iptables
@@ -78,14 +65,8 @@ apply_iptables_rule() {
 
     BLOCKED_SUBNET=$(get_blocked_subnet)
 
-    # Remove the default subnet rule if the detected subnet is different
-    if [[ "$DEFAULT_SUBNET" != "$BLOCKED_SUBNET" ]]; then
-        remove_iptables_rule "$DEFAULT_SUBNET"
-    fi
-
     # Remove duplicate and outdated rules by line number
     remove_duplicate_rules
-    remove_iptables_rule "$BLOCKED_SUBNET"
 
     # Apply new rule with comment
     logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
