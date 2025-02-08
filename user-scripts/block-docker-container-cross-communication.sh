@@ -74,15 +74,20 @@ release_iptables_lock() {
     logger -t userscript1[$$] "$(date): Released iptables lock."
 }
 
-
-# Function to remove duplicate iptables rules **by line number**
+# Function to remove duplicate iptables rules **by exact match instead of line number**
 remove_duplicate_rules() {
     acquire_iptables_lock
     logger -t userscript1[$$] "Checking for duplicate iptables rules..."
-    iptables -L FORWARD --line-numbers | grep "block docker container cross communication" | awk '{print $1}' | sort -rn | while read -r line_num; do
-        logger -t userscript1[$$] "Removing duplicate rule at line $line_num"
-        iptables -D FORWARD "$line_num"
+
+    # Get the blocked subnet
+    BLOCKED_SUBNET=$(get_blocked_subnet)
+
+    # Find existing rules that match the same source and destination
+    iptables-save | grep -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -j DROP" | while read -r rule; do
+        logger -t userscript1[$$] "Removing duplicate rule: $rule"
+        iptables -D FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP
     done
+
     release_iptables_lock
 }
 
@@ -96,15 +101,22 @@ apply_iptables_rule() {
 
     BLOCKED_SUBNET=$(get_blocked_subnet)
 
+    # Remove duplicate rules before adding a new one
     remove_duplicate_rules
 
     acquire_iptables_lock
-    # Apply new rule with comment
-    logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
-    iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
-    
+
+    # Check if the rule already exists
+    if iptables-save | grep -q -- "-A FORWARD -s $BLOCKED_SUBNET -d $BLOCKED_SUBNET -j DROP"; then
+        logger -t userscript1[$$] "$(date): Rule already exists. Skipping addition."
+    else
+        # Apply new rule with comment
+        logger -t userscript1[$$] "$(date): Applying iptables rule to block cross-container communication..."
+        iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
+        logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
+    fi
+
     release_iptables_lock
-    logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
 }
 
 # Run the rule immediately **only if Docker is running**
@@ -122,11 +134,11 @@ while true; do
     # Wait for Docker to start back up
     while [ ! -S /var/run/docker.sock ]; do
         sleep 2
-        cleanup_stale_lock  # Check if lock file needs to be removed
+        cleanup_stale_locks  # Check if lock file needs to be removed
     done
 
     logger -t userscript1[$$] "$(date): Docker restarted. Re-applying iptables rule..."
-    sleep(2)
+    sleep 2
     
     apply_iptables_rule
 done
