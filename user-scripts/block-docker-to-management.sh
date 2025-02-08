@@ -4,18 +4,28 @@ LOCK_FILE="/var/run/docker-watch-eth0.lock"
 IPTABLES_LOCK="/var/lock/iptables.lock"
 
 # Function to check and remove stale lock files (older than 8 seconds)
-cleanup_stale_lock() {
+cleanup_stale_locks() {
+    # Remove stale script lock
     if [[ -f "$LOCK_FILE" ]]; then
         LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE") ))
         if [[ $LOCK_AGE -gt 5 ]]; then
-            logger -t userscript2[$$] "$(date): Stale lock file detected (age: $LOCK_AGE seconds). Removing..."
+            logger -t userscript2[$$] "$(date): Stale script lock detected (age: $LOCK_AGE seconds). Removing..."
             rm -f "$LOCK_FILE"
+        fi
+    fi
+
+    # Remove stale iptables lock
+    if [[ -f "$IPTABLES_LOCK" ]]; then
+        IPTABLES_LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$IPTABLES_LOCK") ))
+        if [[ $IPTABLES_LOCK_AGE -gt 5 ]]; then
+            logger -t userscript2[$$] "$(date): Stale iptables lock detected (age: $IPTABLES_LOCK_AGE seconds). Removing..."
+            rm -f "$IPTABLES_LOCK"
         fi
     fi
 }
 
 # Ensure only one instance runs at a time
-cleanup_stale_lock
+cleanup_stale_locks
 if [[ -f "$LOCK_FILE" ]]; then
     logger -t userscript2[$$] "$(date): Another instance is already running. Exiting."
     exit 1
@@ -129,6 +139,7 @@ while true; do
         inotifywait -e create /var/run 2>/dev/null
         while [ ! -S /var/run/docker.sock ]; do sleep 1; done
         logger -t userscript2[$$] "$(date): Docker restarted. Re-applying iptables rule..."
+        sleep(2.5)
         apply_iptables_rule
     fi
     sleep 5
