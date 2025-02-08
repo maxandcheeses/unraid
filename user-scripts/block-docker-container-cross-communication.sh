@@ -45,6 +45,21 @@ get_blocked_subnet() {
     echo "$BLOCKED_SUBNET"
 }
 
+# Function to remove duplicate iptables rules **by line number**
+remove_duplicate_rules() {
+    exec 200>"$IPTABLES_LOCK"
+    logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
+    flock -x 200  # Blocking lock, waits until available
+
+    logger -t userscript1[$$] "Checking for duplicate iptables rules..."
+    iptables -L FORWARD --line-numbers | grep "block docker container cross communication" | awk '{print $1}' | sort -rn | while read -r line_num; do
+        logger -t userscript1[$$] "Removing duplicate rule at line $line_num"
+        iptables -D FORWARD "$line_num"
+    done
+
+    logger -t userscript1[$$] "$(date): Released iptables lock."
+}
+
 # Function to safely modify iptables with lock
 apply_iptables_rule() {
     # Ensure Docker is running before updating iptables
@@ -68,18 +83,7 @@ apply_iptables_rule() {
     iptables -I FORWARD -s "$BLOCKED_SUBNET" -d "$BLOCKED_SUBNET" -j DROP -m comment --comment "block docker container cross communication"
     logger -t userscript1[$$] "$(date): Applied iptables rule for subnet $BLOCKED_SUBNET."
 
-    # Release lock (automatically released on exit)
-}
-
-# Function to remove duplicate iptables rules **by line number**
-remove_duplicate_rules() {
-    logger -t userscript1[$$] "Checking for duplicate iptables rules..."
-
-    # Get line numbers of rules with the specific comment
-    iptables -L FORWARD --line-numbers | grep "block docker container cross communication" | awk '{print $1}' | sort -rn | while read -r line_num; do
-        logger -t userscript1[$$] "Removing duplicate rule at line $line_num"
-        iptables -D FORWARD "$line_num"
-    done
+    logger -t userscript1[$$] "$(date): Released iptables lock."
 }
 
 # Run the rule immediately **only if Docker is running**
