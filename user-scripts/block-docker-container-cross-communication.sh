@@ -49,16 +49,21 @@ get_blocked_subnet() {
 acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript1[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200 || { logger -t userscript1[$$] "$(date): Failed to acquire iptables lock"; exit 1; }
+    flock -x -w 5 200 || {
+        logger -t userscript1[$$] "$(date): Timed out waiting for iptables lock"
+        exit 1
+    }
     logger -t userscript1[$$] "$(date): Acquired iptables lock."
-    trap 'release_iptables_lock' EXIT  # Ensures lock is always released
+    trap 'release_iptables_lock' EXIT  # Ensures release even on crash
 }
 
 # Function to release iptables lock
 release_iptables_lock() {
-    exec 200>&-  # Close the lock file descriptor
+    exec 200>&-  # Close the lock descriptor
+    rm -f "$IPTABLES_LOCK"  # Ensure lock file is removed
     logger -t userscript1[$$] "$(date): Released iptables lock."
 }
+
 
 # Function to remove duplicate iptables rules **by line number**
 remove_duplicate_rules() {

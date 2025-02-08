@@ -34,13 +34,17 @@ done ) &
 acquire_iptables_lock() {
     exec 200>"$IPTABLES_LOCK"
     logger -t userscript2[$$] "$(date): Waiting for iptables lock..."
-    flock -x 200 || { logger -t userscript2[$$] "$(date): Failed to acquire iptables lock"; exit 1; }
+    flock -x -w 5 200 || {
+        logger -t userscript2[$$] "$(date): Timed out waiting for iptables lock"
+        exit 1
+    }
     logger -t userscript2[$$] "$(date): Acquired iptables lock."
-    trap 'release_iptables_lock' EXIT  # Ensures lock is always released
+    trap 'release_iptables_lock' EXIT  # Ensures release even on crash
 }
 
 release_iptables_lock() {
-    exec 200>&-  # Close the lock file descriptor
+    exec 200>&-  # Close the lock descriptor
+    rm -f "$IPTABLES_LOCK"  # Ensure lock file is removed
     logger -t userscript2[$$] "$(date): Released iptables lock."
 }
 
